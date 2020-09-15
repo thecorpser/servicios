@@ -1,0 +1,170 @@
+creamos una máquina servidor con las siguientes líneas de vagrantfile:
+Vagrant.configure("2") do |config|
+	config.vm.define :servidor do |servidor|
+		servidor.vm.box = "bento/centos-7.8"
+		servidor.vm.network "private_network", ip: "192.168.50.3", virtualbox__intnet: true
+		servidor.vm.hostname = "servidor"
+		servidor.vm.provider "virtualbox" do |v|
+			v.memory = 512
+		end
+	end
+end
+
+iniciamos la máquina y nos conectamos, descargamos lo necesario para el servidor: dhcp, tftp, vsftpd, xinted.
+
+yum install dhcp tftp tftp-server syslinux vsftpd xinetd nano
+
+modificamos el archivo de configuración del dhcp de la siguiente manera con el el editor preferido, en mi caso nano
+
+nano /etc/dhcp/dhcpd.conf
+
+y agregamos las siguientes líneas: 
+
+# DHCP Server Configuration file.
+
+ddns-update-style interim;
+ignore client-updates;
+authoritative;
+allow booting;
+allow bootp;
+allow unknown-clients;
+
+# internal subnet
+subnet 192.168.50.0 netmask 255.255.255.0 {
+range 192.168.50.4 192.168.50.250;
+option domain-name-servers 192.168.50.3;
+option domain-name "pxe.servicios.com";
+option routers 192.168.50.3;
+option broadcast-address 192.168.50.255;
+default-lease-time 600;
+max-lease-time 7200;
+
+# IP of PXE Server
+next-server 192.168.50.3;
+filename "pxelinux.0";
+}
+
+configuramos el servidor tftp editando el archivo /etc/xinetd.d/tftp cambiando el parámetro disable=yes a disable=no:
+
+nano /etc/xinetd.d/tftp
+
+copiamos los siguientes archivos a /var/lib/tftpboot estos archivos están relacionados con el arranque de red:
+
+cp -v /usr/share/syslinux/pxelinux.0 /var/lib/tftpboot
+cp -v /usr/share/syslinux/menu.c32 /var/lib/tftpboot
+cp -v /usr/share/syslinux/memdisk /var/lib/tftpboot
+cp -v /usr/share/syslinux/mboot.c32 /var/lib/tftpboot
+cp -v /usr/share/syslinux/chain.c32 /var/lib/tftpboot
+mkdir /var/lib/tftpboot/pxelinux.cfg
+mkdir /var/lib/tftpboot/networkboot
+
+Descargamos la imagen con la que va a bootear el sistema operativo, la montamos en /mnt/ y volcamos su contenido en el servidor ftp /var/ftp/pub/:
+
+cd /home/vagrant
+wget http://mirror.facom.ufms.br/centos/7.8.2003/isos/x86_64/CentOS-7-x86_64-Minimal-2003.iso
+mount -o loop CentOS-7-x86_64-Minimal-2003.iso /mnt/
+cd /mnt/
+cp -av * /var/ftp/pub
+
+copiamos el archivo kernel vmlinuz y el archivo initrd del iso a /var/lib/tftpboot/networkboot/:
+
+cp /mnt/images/pxeboot/vmlinuz /var/lib/tftpboot/networkboot/
+cp /mnt/images/pxeboot/initrd.img /var/lib/tftpboot/networkboot/
+desmontamos con umount:
+
+umount /mnt/
+
+creamos la contraseña de root en una cadena cifrada para usarla en el archivo kickstart
+
+openssl passwd -1 vagrant
+$1$ouT0bYPE$OBPFLyiJjfBmMJOnl47d6.
+
+creamos un archivo kickstart en la carpeta /var/ftp/pub con el nombre centos7.cfg agregando la siguiente información
+
+nano /var/ftp/pub/centos7.cfg
+
+#platform=x86, AMD64, or Intel EM64T
+#version=DEVEL
+# Firewall configuration
+firewall --disabled
+# Install OS instead of upgrade
+install
+# Use FTP installation media
+url --url="ftp://192.168.50.3/pub/"
+# Root password
+rootpw --iscrypted $1$ouT0bYPE$OBPFLyiJjfBmMJOnl47d6.
+# System authorization information
+auth useshadow passalgo=sha512
+# Use graphical install
+graphical
+firstboot disable
+# System keyboard
+keyboard us
+# System language
+lang en_US
+# SELinux configuration
+selinux disabled
+# Installation logging level
+logging level=info
+# System timezone
+timezone America/Bogota
+# System bootloader configuration
+bootloader location=mbr
+clearpart --all --initlabel
+part swap --asprimary --fstype="swap" --size=1024
+part /boot --fstype xfs --size=300
+part pv.01 --size=1 --grow
+volgroup root_vg01 pv.01
+logvol / --fstype xfs --name=lv_01 --vgname=root_vg01 --size=1 --grow
+%packages
+@^minimal
+@core
+%end
+%addon com_redhat_kdump --disable --reserve-mb='auto'
+%end
+
+Creamos archivo de menú PXE en /var/lib/tftpboot/pxelinux.cfg/default con la siguiente información:
+
+nano /var/lib/tftpboot/pxelinux.cfg/default
+
+default menu.c32
+prompt 0
+timeout 30
+MENU TITLE victor & fabian PXE Menu
+LABEL centos7_x64
+MENU LABEL CentOS 7_X64
+KERNEL /networkboot/vmlinuz
+APPEND initrd=/networkboot/initrd.img inst.repo=ftp://192.168.50.3/pub ks=ftp://192.168.50.3/pub/centos7.cfg 
+
+
+iniciamos y habilitamos xinetd, dhcp y vsftpd:
+
+systemctl start xinetd
+systemctl enable xinetd
+systemctl start dhcpd.service
+systemctl enable dhcpd.service
+systemctl start vsftpd
+systemctl enable vsftpd
+
+ya que en este caso tenemos SELinux habilitado de manera Permissive (esto se puede ver en /etc/selinux/config) configuramos la siguiente regla:
+
+setsebool -P allow_ftpd_full_access 1
+
+checamos si el firewall está activo para abrir los puertos de los servicios, en este caso el firewall no estaba activo pero dejamos documentado los comandos necesarios para abrir estos puertos
+
+firewall-cmd --state
+not running
+
+# (en caso de que si esté corriendo)
+firewall-cmd --add-service=ftp --permanent
+firewall-cmd --add-service=dhcp --permanent
+firewall-cmd --add-port=69/tcp --permanent
+firewall-cmd --add-port=69/udp --permanent 
+firewall-cmd --add-port=4011/udp --permanent
+firewall-cmd --reload
+
+
+
+ciente:
+
+la máquina cliente debe crearse sin cd para instalarle sistema operativo con booteo por red, para esta práctica en específico se uso el adaptador de red "red interna" como se puede ver en la configuración del vagrant file, además se descubrió que para hacer esta instalación es necesario administrarle más de una GB de RAM a la máquina virtual cliente (1.5 para este caso) de lo contrario la máquina no es capaz de montar el sistema de archivos
