@@ -1,0 +1,7 @@
+<VirtualHost *:443>
+    ServerName streama.192.168.50.11.com
+    ServerAdmin email@192.168.50.11.com
+    ProxyPreserveHost On
+    ProxyPass / http://localhost:8080/
+    ProxyPassReverse / http://localhost:8080/
+</VirtualHost>
